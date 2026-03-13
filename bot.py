@@ -337,11 +337,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resp.raise_for_status()
             parsed = resp.json()["content"][0]["text"]
 
-        # 파싱 결과를 세션에도 저장 (정리해줘 할 때 반영)
-        session["items"].append({
-            "type": "user_text",
-            "content": f"[사진 자동파싱 — 마감수치/수급]\n{parsed}",
-        })
+        # 파싱 결과를 세션에도 저장
+        # 마감수치/수급 화면이 아닌 경우 → 원본 이미지를 세션에 저장
+        if "사진 저장 완료" in parsed:
+            session["items"].append({
+                "type": "image",
+                "media_type": "image/jpeg",
+                "data": image_data,
+            })
+        else:
+            # 마감수치/수급 파싱 성공 → 텍스트로 저장
+            session["items"].append({
+                "type": "user_text",
+                "content": f"[사진 자동파싱 — 마감수치/수급]\n{parsed}",
+            })
 
         await update.message.reply_text(parsed)
 
