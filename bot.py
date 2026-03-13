@@ -247,6 +247,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 자료 저장 완료")
 
 
+PHOTO_PARSE_PROMPT = """이 이미지는 국내 증시 마감 수치 화면입니다.
+아래 형식으로 정확하게 파싱해주세요. 수치는 이미지에 보이는 그대로만 사용하고 절대 추정하지 마세요.
+
+📌 마감수치
+☑️ 코스피
+- 000.00pt (▲/▼ 0.00%)
+
+☑️ 코스닥
+- 000.00pt (▲/▼ 0.00%)
+
+📌 수급
+☑️ 코스피
+개인 00,000 외인 -00,000 기관 -00,000
+
+☑️ 코스닥
+개인 -0,000 외인 -000 기관 0,000
+
+규칙:
+- 상승은 ▲, 하락은 ▼
+- 수급 단위는 억원 (이미지에 단위 없으면 그대로)
+- 보이지 않는 수치는 (정보 없음) 표기
+- 이 형식 외에 다른 말 일절 추가하지 말 것"""
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
@@ -259,12 +283,56 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resp = await client.get(file.file_path)
         image_data = base64.b64encode(resp.content).decode()
 
-    session["items"].append({
-        "type": "image",
-        "media_type": "image/jpeg",
-        "data": image_data,
-    })
-    await update.message.reply_text("🖼 사진 저장 완료")
+    await update.message.reply_text("🔍 사진 분석 중...")
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": CLAUDE_MODEL,
+                    "max_tokens": 500,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_data,
+                                },
+                            },
+                            {"type": "text", "text": PHOTO_PARSE_PROMPT},
+                        ],
+                    }],
+                },
+            )
+            resp.raise_for_status()
+            parsed = resp.json()["content"][0]["text"]
+
+        # 파싱 결과를 세션에도 저장 (정리해줘 할 때 반영)
+        session["items"].append({
+            "type": "user_text",
+            "content": f"[사진 자동파싱 — 마감수치/수급]\n{parsed}",
+        })
+
+        await update.message.reply_text(parsed)
+
+    except Exception as e:
+        logger.error(f"Photo parse error: {e}")
+        # 실패 시 원본 이미지 저장으로 폴백
+        session["items"].append({
+            "type": "image",
+            "media_type": "image/jpeg",
+            "data": image_data,
+        })
+        await update.message.reply_text(f"⚠️ 자동 파싱 실패, 원본 저장됨. 나중에 정리해줘 할 때 처리할게요.\n오류: {e}")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
