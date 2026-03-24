@@ -317,11 +317,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(file.file_path)
-        image_bytes = resp.content
+    # 텔레그램 내장 다운로드 메서드 사용 (httpx 직접 접근 대신)
+    import io
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    image_bytes = buf.getvalue()
 
-    # media_type 자동 감지 (jpeg/png 혼재 대응)
+    # media_type 자동 감지
     media_type = detect_media_type(image_bytes)
     image_data = base64.b64encode(image_bytes).decode()
 
