@@ -56,7 +56,7 @@ async def send_to_dashboard(content: str, date_label: str):
                 f"{DASHBOARD_URL}/api/post/closing",
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {API_SECRET}",
+                    "X-API-Secret": API_SECRET,
                 },
                 json={"content": content, "date": date_iso},
             )
