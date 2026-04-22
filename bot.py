@@ -27,14 +27,49 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 sessions: dict[int, dict] = {}
 
+# 대시보드 설정
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").rstrip("/")
+API_SECRET = os.environ.get("API_SECRET", "")
+
+
 def today_label() -> str:
     now = datetime.now(KST)
     return f"{now.month}/{now.day}"
+
 
 def get_session(chat_id: int) -> dict:
     if chat_id not in sessions:
         sessions[chat_id] = {"date": today_label(), "items": []}
     return sessions[chat_id]
+
+
+async def send_to_dashboard(content: str, date_label: str):
+    """대시보드로 마감일지 전송"""
+    if not DASHBOARD_URL or not API_SECRET:
+        logger.warning("DASHBOARD_URL or API_SECRET not set - skipping dashboard sync")
+        return False
+    try:
+        now = datetime.now(KST)
+        date_iso = now.strftime("%Y-%m-%d")
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{DASHBOARD_URL}/api/post/closing",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {API_SECRET}",
+                },
+                json={"content": content, "date": date_iso},
+            )
+            if resp.status_code == 200:
+                logger.info(f"✅ 대시보드 전송 성공: {date_label}")
+                return True
+            else:
+                logger.error(f"❌ 대시보드 전송 실패: {resp.status_code} {resp.text[:200]}")
+                return False
+    except Exception as e:
+        logger.error(f"❌ 대시보드 전송 오류: {e}")
+        return False
+
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
@@ -128,6 +163,7 @@ SYSTEM_PROMPT = """당신은 예니(이예은, Money Plus 앵커)의 국내 증�
 - 항목이 비어있어도 형식은 유지
 """
 
+
 async def call_claude(session: dict) -> str:
     date_label = session["date"]
     items = session["items"]
@@ -173,12 +209,14 @@ async def call_claude(session: dict) -> str:
         resp.raise_for_status()
         return resp.json()["content"][0]["text"]
 
+
 def detect_media_type(image_bytes: bytes) -> str:
     if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
         return "image/png"
     elif image_bytes[:3] == b'\xff\xd8\xff':
         return "image/jpeg"
     return "image/jpeg"
+
 
 PHOTO_PARSE_PROMPT = """이 이미지가 코스피/코스닥 마감 수치와 수급이 나온 화면인지 먼저 판단하세요.
 
@@ -207,14 +245,16 @@ PHOTO_PARSE_PROMPT = """이 이미지가 코스피/코스닥 마감 수치와 �
 【마감수치+수급 화면이 아닌 경우】
 "📎 사진 저장 완료 (마감수치/수급 화면 아님 — 정리해줘 할 때 반영)" 이 문장만 출력하세요."""
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 ClosingBell 봇 시작!\n\n"
         "• 자료 붙여넣기 → 누적 저장\n"
         "• 3/13 마감일지 생성 → 새 날짜 시작\n"
-        "• 정리해줘 → 완성본 출력\n"
+        "• 정리해줘 → 완성본 출력 + 대시보드 자동 전송\n"
         "• 사진/PDF 바로 전송 가능"
     )
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import re
@@ -228,17 +268,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {new_date_match.group(1)} 마감일지 새로 시작합니다!")
         return
 
-    # 전체수정 명령 (띄어쓰기 무관)
+    # 전체수정 명령
     if re.match(r"^전\s*체\s*수\s*정\s*/", text):
         revised = re.sub(r"^전\s*체\s*수\s*정\s*/\s*", "", text).strip()
         if not revised:
             await update.message.reply_text("⚠️ 수정본 내용을 전체수정/ 아래에 붙여넣어 주세요!")
             return
         session = get_session(chat_id)
-        # 기존 전체수정 항목 교체
         session["items"] = [i for i in session["items"] if i["type"] != "revised_base"]
         session["items"].insert(0, {"type": "revised_base", "content": revised})
-        await update.message.reply_text(f"✅ 수정본 저장 완료! 이후 추가 자료는 이 위에 누적됩니다. (누적 {len(session['items'])}건)")
+        # 수정본도 대시보드로 전송
+        sent = await send_to_dashboard(revised, session["date"])
+        dashboard_msg = " + 대시보드 전송 완료" if sent else ""
+        await update.message.reply_text(f"✅ 수정본 저장 완료{dashboard_msg}! 이후 추가 자료는 이 위에 누적됩니다. (누적 {len(session['items'])}건)")
         return
 
     # 정리 명령
@@ -251,6 +293,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = await call_claude(session)
             await update.message.reply_text(result)
+            # 대시보드로 자동 전송
+            sent = await send_to_dashboard(result, session["date"])
+            if sent:
+                await update.message.reply_text("✅ 대시보드에도 전송 완료!")
+            else:
+                await update.message.reply_text("⚠️ 대시보드 전송 실패 (텔레그램 출력은 성공)")
         except Exception as e:
             logger.error(f"Claude API error: {e}")
             await update.message.reply_text(f"❌ 오류: {e}")
@@ -266,12 +314,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["items"].append({"type": "dokhagjushik", "content": text})
         await update.message.reply_text(f"📥 독학주식 저장 (누적 {len(session['items'])}건)")
     elif "상한가 및 급등주" in text or "특징주" in text.split("\n")[0]:
-        # 첫 줄에 "상한가 및 급등주" 또는 "특징주" 포함 시 특징주 자료로 분류
         session["items"].append({"type": "teukjingju", "content": text})
         await update.message.reply_text(f"📥 특징주 저장 (개별 이슈 종목만 반영, 누적 {len(session['items'])}건)")
     else:
         session["items"].append({"type": "user_text", "content": text})
         await update.message.reply_text(f"📥 자료 저장 완료 (누적 {len(session['items'])}건)")
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -306,6 +354,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Photo error: {e}")
         await update.message.reply_text(f"⚠️ 사진 처리 실패: {e}")
 
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
@@ -324,15 +373,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"⚠️ 지원하지 않는 파일 형식: {mime}")
 
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
     types = [item["type"] for item in session["items"]]
+    dash_status = "✅ 설정됨" if (DASHBOARD_URL and API_SECRET) else "❌ 미설정"
     await update.message.reply_text(
         f"📋 [{session['date']} 마감일지]\n"
         f"누적 자료: {len(session['items'])}건\n"
-        f"종류: {', '.join(types) if types else '없음'}"
+        f"종류: {', '.join(types) if types else '없음'}\n"
+        f"대시보드 연동: {dash_status}"
     )
+
 
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -342,8 +395,9 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("ClosingBell 봇 시작")
+    logger.info(f"ClosingBell 봇 시작 - 대시보드 연동: {'ON' if DASHBOARD_URL else 'OFF'}")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
