@@ -37,7 +37,7 @@ def get_session(chat_id: int) -> dict:
     return sessions[chat_id]
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-5"
 
 SYSTEM_PROMPT = """당신은 예니(이예은, Money Plus 앵커)의 국내 증시 마감일지 작성 전담 AI입니다.
 
